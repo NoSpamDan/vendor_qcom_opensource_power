@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  * Copyright (C) 2018-2019 The LineageOS Project
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,6 +27,7 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 #define LOG_NIDEBUG 0
 
 #include <dlfcn.h>
@@ -49,58 +50,50 @@
 #include "power-common.h"
 #include "utils.h"
 
+/**
+ * Returns true if the target is MSM8916.
+ */
+static bool is_target_8916(void) {
+    static int is_8916 = -1;
+    int soc_id;
+
+    if (is_8916 >= 0) return is_8916;
+
+    soc_id = get_soc_id();
+    is_8916 = soc_id == 206 || (soc_id >= 247 && soc_id <= 250);
+
+    return is_8916;
+}
+
 static int current_power_profile = PROFILE_BALANCED;
 
 // clang-format off
-static int profile_high_performance[] = {
-    SCHED_BOOST_ON, CPUS_ONLINE_MAX,
-    ALL_CPUS_PWR_CLPS_DIS, 0x0901,
-    CPU0_MIN_FREQ_TURBO_MAX,
-    CPU1_MIN_FREQ_TURBO_MAX,
-    CPU2_MIN_FREQ_TURBO_MAX,
-    CPU3_MIN_FREQ_TURBO_MAX,
-    CPU4_MIN_FREQ_TURBO_MAX,
-    CPU5_MIN_FREQ_TURBO_MAX,
-    CPU6_MIN_FREQ_TURBO_MAX,
-    CPU7_MIN_FREQ_TURBO_MAX
+static int profile_high_performance_8916[3] = {
+    0x1C00, 0x0901, CPU0_MIN_FREQ_TURBO_MAX,
 };
 
-static int profile_power_save[] = {
-    CPUS_ONLINE_MPD_OVERRIDE, 0x0A03,
-    CPU0_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU1_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU2_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU3_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU4_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU5_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU6_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU7_MAX_FREQ_NONTURBO_MAX - 2
+static int profile_high_performance_8939[11] = {
+    SCHED_BOOST_ON, 0x1C00, 0x0901,
+    CPU0_MIN_FREQ_TURBO_MAX, CPU1_MIN_FREQ_TURBO_MAX,
+    CPU2_MIN_FREQ_TURBO_MAX, CPU3_MIN_FREQ_TURBO_MAX,
+    CPU4_MIN_FREQ_TURBO_MAX, CPU5_MIN_FREQ_TURBO_MAX,
+    CPU6_MIN_FREQ_TURBO_MAX, CPU7_MIN_FREQ_TURBO_MAX,
 };
 
-static int profile_bias_power[] = {
-    0x0A03, 0x0902,
-    CPU0_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU1_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU2_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU3_MAX_FREQ_NONTURBO_MAX - 2,
-    CPU4_MAX_FREQ_NONTURBO_MAX,
-    CPU5_MAX_FREQ_NONTURBO_MAX,
-    CPU6_MAX_FREQ_NONTURBO_MAX,
-    CPU7_MAX_FREQ_NONTURBO_MAX
+static int profile_power_save_8916[1] = {
+    CPU0_MAX_FREQ_NONTURBO_MAX,
 };
 
-static int profile_bias_performance[] = {
-    CPUS_ONLINE_MAX_LIMIT_MAX,
-    CPU4_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU5_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU6_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU7_MIN_FREQ_NONTURBO_MAX + 1
+static int profile_power_save_8939[5] = {
+    CPUS_ONLINE_MAX_LIMIT_2,
+    CPU0_MAX_FREQ_NONTURBO_MAX, CPU1_MAX_FREQ_NONTURBO_MAX,
+    CPU2_MAX_FREQ_NONTURBO_MAX, CPU3_MAX_FREQ_NONTURBO_MAX,
 };
 // clang-format on
 
 #ifdef INTERACTION_BOOST
 int get_number_of_profiles() {
-    return 5;
+    return 3;
 }
 #endif
 
@@ -120,24 +113,21 @@ static int set_power_profile(void* data) {
     }
 
     if (profile == PROFILE_POWER_SAVE) {
-        ret = perform_hint_action(DEFAULT_PROFILE_HINT_ID, profile_power_save,
-                                  ARRAY_SIZE(profile_power_save));
+        ret = perform_hint_action(
+                DEFAULT_PROFILE_HINT_ID,
+                is_target_8916() ? profile_power_save_8916 : profile_power_save_8939,
+                is_target_8916() ? ARRAY_SIZE(profile_power_save_8916)
+                                 : ARRAY_SIZE(profile_power_save_8939));
         profile_name = "powersave";
 
     } else if (profile == PROFILE_HIGH_PERFORMANCE) {
-        ret = perform_hint_action(DEFAULT_PROFILE_HINT_ID, profile_high_performance,
-                                  ARRAY_SIZE(profile_high_performance));
+        ret = perform_hint_action(
+                DEFAULT_PROFILE_HINT_ID,
+                is_target_8916() ? profile_high_performance_8916 : profile_high_performance_8939,
+                is_target_8916() ? ARRAY_SIZE(profile_high_performance_8916)
+                                 : ARRAY_SIZE(profile_high_performance_8939));
         profile_name = "performance";
 
-    } else if (profile == PROFILE_BIAS_POWER) {
-        ret = perform_hint_action(DEFAULT_PROFILE_HINT_ID, profile_bias_power,
-                                  ARRAY_SIZE(profile_bias_power));
-        profile_name = "bias power";
-
-    } else if (profile == PROFILE_BIAS_PERFORMANCE) {
-        ret = perform_hint_action(DEFAULT_PROFILE_HINT_ID, profile_bias_performance,
-                                  ARRAY_SIZE(profile_bias_performance));
-        profile_name = "bias perf";
     } else if (profile == PROFILE_BALANCED) {
         ret = 0;
         profile_name = "balanced";
@@ -150,102 +140,29 @@ static int set_power_profile(void* data) {
     return ret;
 }
 
-static int process_video_encode_hint(void* metadata) {
-    char governor[80];
-    struct video_encode_metadata_t video_encode_metadata;
-
-    if (!metadata) return HINT_NONE;
-
-    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
-        ALOGE("Can't obtain scaling governor.");
-        return HINT_NONE;
-    }
-
-    /* Initialize encode metadata struct fields */
-    memset(&video_encode_metadata, 0, sizeof(struct video_encode_metadata_t));
-    video_encode_metadata.state = -1;
-    video_encode_metadata.hint_id = DEFAULT_VIDEO_ENCODE_HINT_ID;
-
-    if (parse_video_encode_metadata((char*)metadata, &video_encode_metadata) == -1) {
-        ALOGE("Error occurred while parsing metadata.");
-        return HINT_NONE;
-    }
-
-    if (video_encode_metadata.state == 1) {
-        if (is_interactive_governor(governor)) {
-            /* sched and cpufreq params
-             * hispeed freq - 768 MHz
-             * target load - 90
-             * above_hispeed_delay - 40ms
-             * sched_small_tsk - 50
-             */
-            int resource_values[] = {0x2C07, 0x2F5A, 0x2704, 0x4032};
-            perform_hint_action(video_encode_metadata.hint_id, resource_values,
-                                ARRAY_SIZE(resource_values));
-            return HINT_HANDLED;
-        }
-    } else if (video_encode_metadata.state == 0) {
-        if (is_interactive_governor(governor)) {
-            undo_hint_action(video_encode_metadata.hint_id);
-            return HINT_HANDLED;
-        }
-    }
-    return HINT_NONE;
-}
-
-static int process_video_decode_hint(void* metadata) {
-    char governor[80];
-    struct video_decode_metadata_t video_decode_metadata;
-
-    if (!metadata) return HINT_NONE;
-
-    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
-        ALOGE("Can't obtain scaling governor.");
-        return HINT_NONE;
-    }
-
-    /* Initialize decode metadata struct fields */
-    memset(&video_decode_metadata, 0, sizeof(struct video_decode_metadata_t));
-    video_decode_metadata.state = -1;
-    video_decode_metadata.hint_id = DEFAULT_VIDEO_DECODE_HINT_ID;
-
-    if (parse_video_decode_metadata((char*)metadata, &video_decode_metadata) == -1) {
-        ALOGE("Error occurred while parsing metadata.");
-        return HINT_NONE;
-    }
-
-    if (video_decode_metadata.state == 1) {
-        if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_30, HISPEED_LOAD_90, HS_FREQ_1026,
-                                     THREAD_MIGRATION_SYNC_OFF};
-            perform_hint_action(video_decode_metadata.hint_id, resource_values,
-                                ARRAY_SIZE(resource_values));
-            return HINT_HANDLED;
-        }
-    } else if (video_decode_metadata.state == 0) {
-        if (is_interactive_governor(governor)) {
-            undo_hint_action(video_decode_metadata.hint_id);
-            return HINT_HANDLED;
-        }
-    }
-    return HINT_NONE;
-}
-
 // clang-format off
 static int resources_interaction_fling_boost[] = {
     ALL_CPUS_PWR_CLPS_DIS,
     SCHED_BOOST_ON,
-    SCHED_PREFER_IDLE_DIS
+    SCHED_PREFER_IDLE_DIS,
+    0x20D
 };
 
 static int resources_interaction_boost[] = {
     ALL_CPUS_PWR_CLPS_DIS,
-    SCHED_PREFER_IDLE_DIS
+    SCHED_PREFER_IDLE_DIS,
+    0x20D
 };
 
 static int resources_launch[] = {
+    ALL_CPUS_PWR_CLPS_DIS,
     SCHED_BOOST_ON,
-    0x20C
+    SCHED_PREFER_IDLE_DIS,
+    0x20F,
+    0x1C00,
+    0x4001,
+    0x4101,
+    0x4201
 };
 // clang-format on
 
@@ -329,11 +246,8 @@ int power_hint_override(power_hint_t hint, void* data) {
     }
 
     switch (hint) {
-        case POWER_HINT_VIDEO_ENCODE:
-            ret_val = process_video_encode_hint(data);
-            break;
-        case POWER_HINT_VIDEO_DECODE:
-            ret_val = process_video_decode_hint(data);
+        case POWER_HINT_VIDEO_ENCODE: /* Do nothing for encode case */
+            ret_val = HINT_HANDLED;
             break;
         case POWER_HINT_INTERACTION:
             process_interaction_hint(data);
@@ -358,10 +272,18 @@ int set_interactive_override(int on) {
 
     if (!on) {
         /* Display off */
-        if (is_interactive_governor(governor)) {
-            int resource_values[] = {CPUS_ONLINE_MPD_OVERRIDE}; /* 4+0 core config in display off */
-            perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
-                                ARRAY_SIZE(resource_values));
+        if (is_target_8916()) {
+            if (is_interactive_governor(governor)) {
+                int resource_values[] = {TR_MS_50, THREAD_MIGRATION_SYNC_OFF};
+                perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
+                                    ARRAY_SIZE(resource_values));
+            }
+        } else {
+            if (is_interactive_governor(governor)) {
+                int resource_values[] = {TR_MS_CPU0_50, TR_MS_CPU4_50, THREAD_MIGRATION_SYNC_OFF};
+                perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
+                                    ARRAY_SIZE(resource_values));
+            }
         }
     } else {
         /* Display on */

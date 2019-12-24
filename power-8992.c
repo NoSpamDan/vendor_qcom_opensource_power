@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  * Copyright (C) 2018-2019 The LineageOS Project
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,7 +37,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
-#include <unistd.h>
 
 #define LOG_TAG "QTI PowerHAL"
 #include <hardware/hardware.h>
@@ -50,42 +49,52 @@
 #include "power-common.h"
 #include "utils.h"
 
-#define NUM_PERF_MODES 3
-
-const int kMaxLaunchDuration = 5000;      /* ms */
-const int kMaxInteractiveDuration = 5000; /* ms */
-const int kMinInteractiveDuration = 400;  /* ms */
-
 static int current_power_profile = PROFILE_BALANCED;
+
+// clang-format off
+static int profile_high_performance[] = {
+    SCHED_BOOST_ON, CPUS_ONLINE_MAX,
+    ALL_CPUS_PWR_CLPS_DIS, 0x0901,
+    CPU0_MIN_FREQ_TURBO_MAX,
+    CPU1_MIN_FREQ_TURBO_MAX,
+    CPU2_MIN_FREQ_TURBO_MAX,
+    CPU3_MIN_FREQ_TURBO_MAX,
+    CPU4_MIN_FREQ_TURBO_MAX,
+    CPU5_MIN_FREQ_TURBO_MAX
+};
+
+static int profile_power_save[] = {
+    CPUS_ONLINE_MPD_OVERRIDE, 0x0A03,
+    CPU0_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU1_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU2_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU3_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU4_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU5_MAX_FREQ_NONTURBO_MAX - 2
+};
+
+static int profile_bias_power[] = {
+    0x0A03, 0x0902,
+    CPU0_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU1_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU2_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU3_MAX_FREQ_NONTURBO_MAX - 2,
+    CPU4_MAX_FREQ_NONTURBO_MAX,
+    CPU5_MAX_FREQ_NONTURBO_MAX
+};
+
+static int profile_bias_performance[] = {
+    CPUS_ONLINE_MAX_LIMIT_MAX,
+    CPU4_MIN_FREQ_NONTURBO_MAX + 1,
+    CPU5_MIN_FREQ_NONTURBO_MAX + 1
+};
+// clang-format on
 
 #ifdef INTERACTION_BOOST
 int get_number_of_profiles() {
     return 5;
 }
 #endif
-
-// clang-format off
-static int profile_high_performance[] = {
-    SCHED_BOOST_ON_V3, 0x1,
-    MIN_FREQ_BIG_CORE_0, 0xFFF,
-    MIN_FREQ_LITTLE_CORE_0, 0xFFF,
-    ALL_CPUS_PWR_CLPS_DIS_V3, 0x1,
-};
-
-static int profile_power_save[] = {
-    MAX_FREQ_BIG_CORE_0, 0x3E8,
-    MAX_FREQ_LITTLE_CORE_0, 0x3E8,
-};
-
-static int profile_bias_power[] = {
-    MAX_FREQ_BIG_CORE_0, 0x514,
-    MAX_FREQ_LITTLE_CORE_0, 0x3E8,
-};
-
-static int profile_bias_performance[] = {
-    MIN_FREQ_BIG_CORE_0, 0x578,
-};
-// clang-format on
 
 static int set_power_profile(void* data) {
     int profile = data ? *((int*)data) : 0;
@@ -133,100 +142,9 @@ static int set_power_profile(void* data) {
     return ret;
 }
 
-typedef enum {
-    NORMAL_MODE = 0,
-    SUSTAINED_MODE = 1,
-    VR_MODE = 2,
-    VR_SUSTAINED_MODE = (SUSTAINED_MODE | VR_MODE),
-    INVALID_MODE = 0xFF
-} perf_mode_type_t;
-
-typedef struct perf_mode {
-    perf_mode_type_t type;
-    int perf_hint_id;
-} perf_mode_t;
-
-perf_mode_t perf_modes[NUM_PERF_MODES] = {{SUSTAINED_MODE, SUSTAINED_PERF_HINT},
-                                          {VR_MODE, VR_MODE_HINT},
-                                          {VR_SUSTAINED_MODE, VR_MODE_SUSTAINED_PERF_HINT}};
-
-static int current_mode = NORMAL_MODE;
-
-static inline int get_perfd_hint_id(perf_mode_type_t type) {
-    int i;
-    for (i = 0; i < NUM_PERF_MODES; i++) {
-        if (perf_modes[i].type == type) {
-            ALOGD("Hint id is 0x%x for mode 0x%x", perf_modes[i].perf_hint_id, type);
-            return perf_modes[i].perf_hint_id;
-        }
-    }
-    ALOGD("Couldn't find the hint for mode 0x%x", type);
-    return 0;
-}
-
-static int switch_mode(perf_mode_type_t mode) {
-    int hint_id = 0;
-    static int perfd_mode_handle = -1;
-
-    // release existing mode if any
-    if (CHECK_HANDLE(perfd_mode_handle)) {
-        ALOGD("Releasing handle 0x%x", perfd_mode_handle);
-        release_request(perfd_mode_handle);
-        perfd_mode_handle = -1;
-    }
-    // switch to a perf mode
-    hint_id = get_perfd_hint_id(mode);
-    if (hint_id != 0) {
-        perfd_mode_handle = perf_hint_enable(hint_id, 0);
-        if (!CHECK_HANDLE(perfd_mode_handle)) {
-            ALOGE("Failed perf_hint_interaction for mode: 0x%x", mode);
-            return -1;
-        }
-        ALOGD("Acquired handle 0x%x", perfd_mode_handle);
-    }
-    return 0;
-}
-
-static int process_perf_hint(void* data, perf_mode_type_t mode) {
-    // enable
-    if (data) {
-        ALOGI("Enable request for mode: 0x%x", mode);
-        // check if mode is current mode
-        if (current_mode & mode) {
-            ALOGD("Mode 0x%x already enabled", mode);
-            return HINT_HANDLED;
-        }
-        // enable requested mode
-        if (0 != switch_mode(current_mode | mode)) {
-            ALOGE("Couldn't enable mode 0x%x", mode);
-            return HINT_NONE;
-        }
-        current_mode |= mode;
-        ALOGI("Current mode is 0x%x", current_mode);
-        // disable
-    } else {
-        ALOGI("Disable request for mode: 0x%x", mode);
-        // check if mode is enabled
-        if (!(current_mode & mode)) {
-            ALOGD("Mode 0x%x already disabled", mode);
-            return HINT_HANDLED;
-        }
-        // disable requested mode
-        if (0 != switch_mode(current_mode & ~mode)) {
-            ALOGE("Couldn't disable mode 0x%x", mode);
-            return HINT_NONE;
-        }
-        current_mode &= ~mode;
-        ALOGI("Current mode is 0x%x", current_mode);
-    }
-
-    return HINT_HANDLED;
-}
-
 static int process_video_encode_hint(void* metadata) {
     char governor[80];
     struct video_encode_metadata_t video_encode_metadata;
-    static int video_encode_handle = 0;
 
     if (!metadata) return HINT_NONE;
 
@@ -238,6 +156,7 @@ static int process_video_encode_hint(void* metadata) {
     /* Initialize encode metadata struct fields */
     memset(&video_encode_metadata, 0, sizeof(struct video_encode_metadata_t));
     video_encode_metadata.state = -1;
+    video_encode_metadata.hint_id = DEFAULT_VIDEO_ENCODE_HINT_ID;
 
     if (parse_video_encode_metadata((char*)metadata, &video_encode_metadata) == -1) {
         ALOGE("Error occurred while parsing metadata.");
@@ -246,17 +165,86 @@ static int process_video_encode_hint(void* metadata) {
 
     if (video_encode_metadata.state == 1) {
         if (is_interactive_governor(governor)) {
-            video_encode_handle = perf_hint_enable(VIDEO_ENCODE_HINT, 0);
+            /* sched and cpufreq params
+             * hispeed freq - 768 MHz
+             * target load - 90
+             * above_hispeed_delay - 40ms
+             * sched_small_tsk - 50
+             */
+            int resource_values[] = {0x2C07, 0x2F5A, 0x2704, 0x4032};
+            perform_hint_action(video_encode_metadata.hint_id, resource_values,
+                                ARRAY_SIZE(resource_values));
             return HINT_HANDLED;
         }
     } else if (video_encode_metadata.state == 0) {
         if (is_interactive_governor(governor)) {
-            release_request(video_encode_handle);
+            undo_hint_action(video_encode_metadata.hint_id);
             return HINT_HANDLED;
         }
     }
     return HINT_NONE;
 }
+
+static int process_video_decode_hint(void* metadata) {
+    char governor[80];
+    struct video_decode_metadata_t video_decode_metadata;
+
+    if (!metadata) return HINT_NONE;
+
+    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
+        ALOGE("Can't obtain scaling governor.");
+        return HINT_NONE;
+    }
+
+    /* Initialize decode metadata struct fields */
+    memset(&video_decode_metadata, 0, sizeof(struct video_decode_metadata_t));
+    video_decode_metadata.state = -1;
+    video_decode_metadata.hint_id = DEFAULT_VIDEO_DECODE_HINT_ID;
+
+    if (parse_video_decode_metadata((char*)metadata, &video_decode_metadata) == -1) {
+        ALOGE("Error occurred while parsing metadata.");
+        return HINT_NONE;
+    }
+
+    if (video_decode_metadata.state == 1) {
+        if (is_interactive_governor(governor)) {
+            int resource_values[] = {TR_MS_30, HISPEED_LOAD_90, HS_FREQ_1026,
+                                     THREAD_MIGRATION_SYNC_OFF};
+            perform_hint_action(video_decode_metadata.hint_id, resource_values,
+                                ARRAY_SIZE(resource_values));
+            return HINT_HANDLED;
+        }
+    } else if (video_decode_metadata.state == 0) {
+        if (is_interactive_governor(governor)) {
+            undo_hint_action(video_decode_metadata.hint_id);
+            return HINT_HANDLED;
+        }
+    }
+    return HINT_NONE;
+}
+
+// clang-format off
+static int resources_interaction_fling_boost[] = {
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_BOOST_ON,
+    SCHED_PREFER_IDLE_DIS
+};
+
+static int resources_interaction_boost[] = {
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_PREFER_IDLE_DIS
+};
+
+static int resources_launch[] = {
+    SCHED_BOOST_ON,
+    0x20C
+};
+// clang-format on
+
+const int kDefaultInteractiveDuration = 500; /* ms */
+const int kMinFlingDuration = 1500;          /* ms */
+const int kMaxInteractiveDuration = 5000;    /* ms */
+const int kMaxLaunchDuration = 5000;         /* ms */
 
 static void process_interaction_hint(void* data) {
     static struct timespec s_previous_boost_timespec;
@@ -264,12 +252,7 @@ static void process_interaction_hint(void* data) {
 
     struct timespec cur_boost_timespec;
     long long elapsed_time;
-    int duration = kMinInteractiveDuration;
-
-    if (current_mode != NORMAL_MODE) {
-        ALOGV("%s: ignoring due to other active perf hints", __func__);
-        return;
-    }
+    int duration = kDefaultInteractiveDuration;
 
     if (data) {
         int input_duration = *((int*)data);
@@ -289,7 +272,12 @@ static void process_interaction_hint(void* data) {
     s_previous_boost_timespec = cur_boost_timespec;
     s_previous_duration = duration;
 
-    perf_hint_enable_with_type(VENDOR_HINT_SCROLL_BOOST, duration, SCROLL_VERTICAL);
+    if (duration >= kMinFlingDuration) {
+        interaction(duration, ARRAY_SIZE(resources_interaction_fling_boost),
+                    resources_interaction_fling_boost);
+    } else {
+        interaction(duration, ARRAY_SIZE(resources_interaction_boost), resources_interaction_boost);
+    }
 }
 
 static int process_activity_launch_hint(void* data) {
@@ -306,11 +294,9 @@ static int process_activity_launch_hint(void* data) {
         return HINT_HANDLED;
     }
 
-    if (current_mode != NORMAL_MODE) {
-        ALOGV("%s: ignoring due to other active perf hints", __func__);
-    } else if (!launch_mode) {
-        launch_handle = perf_hint_enable_with_type(VENDOR_HINT_FIRST_LAUNCH_BOOST,
-                                                   kMaxLaunchDuration, LAUNCH_BOOST_V1);
+    if (!launch_mode) {
+        launch_handle = interaction_with_handle(launch_handle, kMaxLaunchDuration,
+                                                ARRAY_SIZE(resources_launch), resources_launch);
         if (!CHECK_HANDLE(launch_handle)) {
             ALOGE("Failed to perform launch boost");
             return HINT_NONE;
@@ -324,8 +310,7 @@ int power_hint_override(power_hint_t hint, void* data) {
     int ret_val = HINT_NONE;
 
     if (hint == POWER_HINT_SET_PROFILE) {
-        if (set_power_profile(data) < 0)
-            ALOGE("Setting power profile failed. perf HAL not started?");
+        if (set_power_profile(data) < 0) ALOGE("Setting power profile failed. perfd not started?");
         return HINT_HANDLED;
     }
 
@@ -339,11 +324,8 @@ int power_hint_override(power_hint_t hint, void* data) {
         case POWER_HINT_VIDEO_ENCODE:
             ret_val = process_video_encode_hint(data);
             break;
-        case POWER_HINT_SUSTAINED_PERFORMANCE:
-            ret_val = process_perf_hint(data, SUSTAINED_MODE);
-            break;
-        case POWER_HINT_VR_MODE:
-            ret_val = process_perf_hint(data, VR_MODE);
+        case POWER_HINT_VIDEO_DECODE:
+            ret_val = process_video_decode_hint(data);
             break;
         case POWER_HINT_INTERACTION:
             process_interaction_hint(data);
@@ -358,6 +340,26 @@ int power_hint_override(power_hint_t hint, void* data) {
     return ret_val;
 }
 
-int set_interactive_override(int UNUSED(on)) {
-    return HINT_HANDLED; /* Don't excecute this code path, not in use */
+int set_interactive_override(int on) {
+    char governor[80];
+
+    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
+        ALOGE("Can't obtain scaling governor.");
+        return HINT_NONE;
+    }
+
+    if (!on) {
+        /* Display off */
+        if (is_interactive_governor(governor)) {
+            int resource_values[] = {CPUS_ONLINE_MPD_OVERRIDE}; /* 4+0 core config in display off */
+            perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
+                                ARRAY_SIZE(resource_values));
+        }
+    } else {
+        /* Display on */
+        if (is_interactive_governor(governor)) {
+            undo_hint_action(DISPLAY_STATE_HINT_ID);
+        }
+    }
+    return HINT_HANDLED;
 }
